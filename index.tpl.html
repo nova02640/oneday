@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="referrer" content="no-referrer">
+<title>一天</title>
+<style>
+  :root{ --ink:#e8eef7; --dim:rgba(232,238,247,.55); }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#04060c;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+    color:var(--ink);}
+  #sky{position:fixed;inset:0;width:100%;height:100%;display:block}
+  .vignette{position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse at 50% 58%,rgba(0,0,0,0) 42%,rgba(0,0,0,.42) 100%);}
+  .top{position:fixed;top:max(22px,env(safe-area-inset-top));left:26px;right:26px;
+    display:flex;justify-content:space-between;align-items:baseline;
+    font-size:12px;letter-spacing:.22em;color:var(--dim);pointer-events:none;
+    font-variant-numeric:tabular-nums}
+  .top .t2{letter-spacing:.14em;opacity:.75}
+  .cap{position:fixed;left:50%;bottom:36vh;transform:translateX(-50%);
+    text-align:center;pointer-events:none;opacity:0;transition:opacity 1.6s ease}
+  .cap .big{font-size:26px;letter-spacing:.32em;font-variant-numeric:tabular-nums;
+    color:#fff;text-shadow:0 0 26px rgba(255,208,140,.55)}
+  .cap .small{margin-top:10px;font-size:13px;letter-spacing:.30em;color:rgba(255,232,200,.82)}
+  .cap.on{opacity:1}
+  .bottom{position:fixed;left:0;right:0;bottom:max(18px,env(safe-area-inset-bottom));
+    display:flex;flex-direction:column;align-items:center;gap:12px;padding:0 26px}
+  .clock{font-size:13px;letter-spacing:.26em;color:var(--dim);font-variant-numeric:tabular-nums;
+    transition:color .6s}
+  .clock b{font-weight:400;color:var(--ink)}
+  .track{position:relative;width:min(560px,86vw);height:22px;cursor:pointer;touch-action:none}
+  .track .line{position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(232,238,247,.18)}
+  .track .fill{position:absolute;left:0;top:50%;height:1px;background:rgba(232,238,247,.55);
+    width:0;transition:none}
+  .track .knob{position:absolute;top:50%;width:7px;height:7px;border-radius:50%;
+    background:#fff;transform:translate(-50%,-50%);box-shadow:0 0 12px rgba(255,255,255,.7)}
+  .track .mark{position:absolute;top:50%;width:3px;height:3px;border-radius:50%;
+    background:rgba(255,214,150,.85);transform:translate(-50%,-50%);
+    box-shadow:0 0 10px rgba(255,196,120,.8)}
+  .track .tick{position:absolute;top:50%;width:1px;height:5px;background:rgba(232,238,247,.25);
+    transform:translate(-50%,-50%)}
+  .hint{font-size:10.5px;letter-spacing:.18em;color:rgba(232,238,247,.28);
+    transition:opacity 1.2s}
+  .hint.gone{opacity:0}
+  @media (max-width:640px){
+    .top{font-size:10.5px;left:18px;right:18px}
+    .cap{bottom:auto;top:19vh}
+    .cap .big{font-size:20px}
+    .cap .small{font-size:11px}
+  }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<div class="vignette"></div>
+
+<div class="top">
+  <div>2024.04.12</div>
+  <div class="t2">永远的一天</div>
+</div>
+
+<div class="cap" id="cap">
+  <div class="big">13:30</div>
+  <div class="small">两颗星，同时亮起</div>
+</div>
+
+<div class="bottom">
+  <div class="clock"><b id="clock">04:00</b></div>
+  <div class="track" id="track">
+    <div class="line"></div><div class="fill" id="fill"></div>
+    <div class="mark" id="mk"></div>
+    <div class="knob" id="knob"></div>
+  </div>
+  <div class="hint" id="hint">点击画面暂停 · 拖动时间轴回看</div>
+</div>
+
+<script>
+const SKY = __SKY_JSON__;
+</script>
+<script>
+(() => {
+"use strict";
+const D = Math.PI / 180;
+
+/* ---------- 解码烘焙数据 ---------- */
+function b64bytes(s){ const bin = atob(s); const u = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+function i16(s){ const b=b64bytes(s); return new Int16Array(b.buffer, b.byteOffset, b.byteLength/2); }
+function i8(s){ const b=b64bytes(s); return new Int8Array(b.buffer, b.byteOffset, b.byteLength); }
+function u8(s){ const b=b64bytes(s); return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); }
+
+const N = SKY.n;
+const sAlt0 = i16(SKY.stars.alt), sAz0 = i16(SKY.stars.az);
+const sMag = i8(SKY.stars.mag), sCi = i8(SKY.stars.ci);
+const mwAlt0 = i16(SKY.mw.alt), mwAz0 = i16(SKY.mw.az), mwW = u8(SKY.mw.w);
+const LINES = SKY.lines;
+const SER = SKY.series, ILLUM = SKY.illum, MATS = SKY.mats;
+
+/* 单位矢量（ENU: x 东, y 北, z 天顶） */
+const sV = new Float32Array(N*3);
+for (let i=0;i<N;i++){
+  const a = sAlt0[i]/100*D, z = sAz0[i]/100*D;
+  sV[i*3]   = Math.cos(a)*Math.sin(z);
+  sV[i*3+1] = Math.cos(a)*Math.cos(z);
+  sV[i*3+2] = Math.sin(a);
+}
+const mwN = mwAlt0.length;
+const mwV = new Float32Array(mwN*3);
+for (let i=0;i<mwN;i++){
+  const a = mwAlt0[i]/100*D, z = mwAz0[i]/100*D;
+  mwV[i*3]   = Math.cos(a)*Math.sin(z);
+  mwV[i*3+1] = Math.cos(a)*Math.cos(z);
+  mwV[i*3+2] = Math.sin(a);
+}
+/* 星座连线点：烘焙时已转成参考时刻的地平坐标 [alt,az] */
+
+/* ---------- 相机 ---------- */
+const CAM_AZ = 180, CAM_ALT = 33, FOV_V = 100;
+function camBasis(){
+  const a = CAM_ALT*D, z = CAM_AZ*D;
+  const f = [Math.cos(a)*Math.sin(z), Math.cos(a)*Math.cos(z), Math.sin(a)];
+  let r = [f[1]*1 - 0, 0 - f[0]*1, 0];           // cross(f, up)
+  r = [f[1], -f[0], 0];
+  const rl = Math.hypot(r[0],r[1],r[2]); r = r.map(v=>v/rl);
+  const u = [ r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0] ];
+  return {f,r,u};
+}
+let CAM = camBasis();
+
+let W=0,H=0,DPR=1,cx=0,cy=0,fpx=0,UI_SCALE=1;
+const cvs = document.getElementById("sky");
+const ctx = cvs.getContext("2d", {alpha:false});
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 1.75);
+  W = window.innerWidth; H = window.innerHeight;
+  cvs.width = Math.round(W*DPR); cvs.height = Math.round(H*DPR);
+  cvs.style.width = W+"px"; cvs.style.height = H+"px";
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  const portrait = H > W*1.08;
+  cx = W/2;
+  cy = portrait ? H*0.56 : H*0.60;
+  fpx = portrait ? (W/2)/Math.tan(48*D) : (H/2)/Math.tan(FOV_V/2*D);
+  UI_SCALE = Math.max(0.62, Math.min(1.25, Math.min(W,H)/760));
+  CAM = camBasis();
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------- 时间与插值 ---------- */
+const T0 = SKY.t0, T1 = SKY.t1, STEP = SKY.step/60, NS = SKY.samples;
+let t = T0 + 0.25;         // 当前时刻（小时）
+let playing = true;
+let hold = 0;
+
+function idx(f){ return Math.min(NS-2, Math.max(0, Math.floor((f - T0)/STEP))); }
+function ser(name, f){
+  const arr = SER[name], i = idx(f), u = Math.min(1, Math.max(0, (f - T0)/STEP - i));
+  const a = arr[i], b = arr[i+1];
+  return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u];
+}
+function mat(f){
+  const i = idx(f), u = Math.min(1, Math.max(0, (f - T0)/STEP - i));
+  const A = MATS[i], B = MATS[i+1], M = new Float32Array(9);
+  for (let k=0;k<9;k++) M[k] = A[k] + (B[k]-A[k])*u;
+  return M;
+}
+const SEG = [[4.0,5.5,14],[5.5,7.0,16],[7.0,12.5,26],[12.5,14.0,22],
+             [14.0,17.5,30],[17.5,19.5,22],[19.5,22.0,18],[22.0,24.0,12]];
+function rateAt(f){
+  for (let i=0;i<SEG.length;i++){ const [a,b,sec]=SEG[i];
+    if (f>=a && f<b) return (b-a)/sec; }
+  return (T1-T0)/160;
+}
+function illum(f){ const i = idx(f), u = Math.min(1,Math.max(0,(f-T0)/STEP-i));
+  return ILLUM[i] + (ILLUM[i+1]-ILLUM[i])*u; }
+
+/* ---------- 投影 ---------- */
+function projAltAz(alt, az, out){
+  const a = alt*D, z = az*D;
+  const vx = Math.cos(a)*Math.sin(z), vy = Math.cos(a)*Math.cos(z), vz = Math.sin(a);
+  return projVec(vx,vy,vz,out);
+}
+function projVec(vx,vy,vz,out){
+  const {f,r,u} = CAM;
+  const zc = vx*f[0]+vy*f[1]+vz*f[2];
+  if (zc <= 0.08) return null;
+  const xc = vx*r[0]+vy*r[1]+vz*r[2];
+  const yc = vx*u[0]+vy*u[1]+vz*u[2];
+  out.x = cx + (xc/zc)*fpx;
+  out.y = cy - (yc/zc)*fpx;
+  out.z = zc;
+  return out;
+}
+
+/* ---------- 色彩 ---------- */
+const STOPS = [
+  [-90, [ 4,  7, 16], [ 8, 12, 26]],
+  [-20, [ 6, 11, 28], [12, 20, 44]],
+  [-14, [10, 21, 50], [26, 40, 76]],
+  [ -8, [22, 42, 86], [78, 82, 122]],
+  [ -3, [42, 70,128], [178, 116, 118]],
+  [  0, [58, 94,158], [246, 152, 96]],
+  [  4, [66,116,188], [248, 178,118]],
+  [ 10, [56,116,196], [186,196,206]],
+  [ 30, [42,102,190], [156,184,214]],
+  [ 90, [36, 96,184], [150,182,214]],
+];
+const lerp=(a,b,k)=>a+(b-a)*k;
+const rgb=(c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a===undefined?1:a})`;
+function skyColors(sunAlt){
+  let i=0; while (i<STOPS.length-2 && sunAlt>STOPS[i+1][0]) i++;
+  const A=STOPS[i], B=STOPS[i+1];
+  const k = Math.min(1, Math.max(0, (sunAlt-A[0])/(B[0]-A[0])));
+  const z=[0,1,2].map(j=>lerp(A[1][j],B[1][j],k));
+  const h=[0,1,2].map(j=>lerp(A[2][j],B[2][j],k));
+  return {z,h};
+}
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+function starAlpha(sunAlt){ return clamp((-sunAlt-3)/9, 0, 1); }
+
+/* 预渲染的星点光晕 */
+const GLOW = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 96;
+  const g = c.getContext("2d");
+  const rg = g.createRadialGradient(48,48,0,48,48,48);
+  rg.addColorStop(0, "rgba(255,255,255,1)");
+  rg.addColorStop(0.22, "rgba(226,236,255,0.55)");
+  rg.addColorStop(0.55, "rgba(196,214,255,0.14)");
+  rg.addColorStop(1, "rgba(180,205,255,0)");
+  g.fillStyle = rg; g.fillRect(0,0,96,96);
+  return c;
+})();
+
+/* ---------- 星球标记 ---------- */
+const BODY_COL = { jupiter:"#ffe6bd", venus:"#fff4d8", mars:"#ff9b7a", saturn:"#efe0b8" };
+const BODY_R = { jupiter:1.9, venus:2.1, mars:1.4, saturn:1.5 };
+
+/* ---------- 彩蛋：两颗星 ---------- */
+/* 以 2024-04-12 13:30 的地平坐标定义，随天球一起转 */
+const EGG_SEP = 9.0;      // 两星间隔（度）
+const eggBase = (() => {
+  const a = SKY.egg[0]*D, z = SKY.egg[1]*D;
+  return [Math.cos(a)*Math.sin(z), Math.cos(a)*Math.cos(z), Math.sin(a)];
+})();
+const EGG_T = 13.5;       // 13:30
+const EGG_ON = 13.47;     // 约 13:28 开始出现
+
+/* ---------- 地面 / 人 ---------- */
+const ridgeA = x => { const ph=[1.7,3.1,5.9,8.3], am=[1,.6,.32,.18]; let s=0;
+  for(let i=0;i<ph.length;i++) s+=am[i]*Math.sin(x*(i+1)*2.6+ph[i]); return s/2.1; };
+const ridgeB = x => { const ph=[4.4,0.7,2.2,6.1], am=[1,.55,.28,.12]; let s=0;
+  for(let i=0;i<ph.length;i++) s+=am[i]*Math.sin(x*(i+1)*3.3+ph[i]); return s/2.1; };
+
+function ridgePath(horY, fn, base, amp){
+  const p = new Path2D(); p.moveTo(-6, H+6);
+  const st = Math.max(3, W/320);
+  for (let x=-6; x<=W+6; x+=st){ p.lineTo(x, horY(x) - (base + fn(x/W)*amp)); }
+  p.lineTo(W+6, H+6); p.closePath(); return p;
+}
+
+function drawGround(horY, hor, lowSun){
+  /* 远山 */
+  const far = ridgePath(horY, ridgeA, H*0.030, H*0.046);
+  let g = ctx.createLinearGradient(0,H*0.55,0,H);
+  g.addColorStop(0, `rgb(${hor[0]*0.30|0},${hor[1]*0.33|0},${hor[2]*0.40|0})`);
+  g.addColorStop(0.45, `rgb(${hor[0]*0.10|0},${hor[1]*0.11|0},${hor[2]*0.14|0})`);
+  g.addColorStop(1, "#05070c");
+  ctx.fillStyle = g; ctx.fill(far);
+
+  /* 近处坡地 */
+  const near = ridgePath(horY, ridgeB, H*0.010, H*0.030);
+  g = ctx.createLinearGradient(0,H*0.80,0,H);
+  g.addColorStop(0, `rgb(${hor[0]*0.06|0},${hor[1]*0.065|0},${hor[2]*0.08|0})`);
+  g.addColorStop(0.5, "#04060b");
+  g.addColorStop(1, "#010204");
+  ctx.fillStyle = g; ctx.fill(near);
+  return x => horY(x) - (H*0.010 + ridgeB(x/W)*H*0.030);
+}
+
+/* 人：背对镜头，微微仰头 */
+function drawPerson(gy, hor, lowSun){
+  const hh = Math.min(H*0.185, W*0.30) * (H > W*1.08 ? 1.05 : 1);
+  const px = W*0.400, py = gy + hh*0.010;
+  const br = 1 + Math.sin(performance.now()/2700)*0.006;
+
+  /* 背后的天光 */
+  const gl = ctx.createRadialGradient(px, py-hh*0.62, 0, px, py-hh*0.62, hh*1.5);
+  gl.addColorStop(0, `rgba(${hor[0]|0},${hor[1]|0},${hor[2]|0},${0.13+0.16*lowSun})`);
+  gl.addColorStop(0.45, `rgba(${hor[0]|0},${hor[1]|0},${hor[2]|0},${0.05+0.07*lowSun})`);
+  gl.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = gl;
+  ctx.fillRect(px-hh*1.6, py-hh*2.2, hh*3.2, hh*3.0);
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.scale(hh, hh*br);
+  ctx.fillStyle = "#02040a"; ctx.strokeStyle = "#02040a";
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+  ctx.lineWidth = 0.064;                       /* 腿 */
+  ctx.beginPath(); ctx.moveTo(-0.046,-0.50); ctx.lineTo(-0.050,-0.034); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 0.046,-0.50); ctx.lineTo( 0.050,-0.034); ctx.stroke();
+
+  ctx.lineWidth = 0.042;                       /* 脚 */
+  ctx.beginPath(); ctx.moveTo(-0.050,-0.030); ctx.lineTo(-0.072,-0.022); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 0.050,-0.030); ctx.lineTo( 0.072,-0.022); ctx.stroke();
+
+  ctx.lineWidth = 0.205;                       /* 躯干 */
+  ctx.beginPath(); ctx.moveTo(0,-0.790); ctx.lineTo(0,-0.505); ctx.stroke();
+
+  ctx.lineWidth = 0.047;                       /* 手臂 */
+  ctx.beginPath(); ctx.moveTo(-0.082,-0.780); ctx.lineTo(-0.101,-0.505); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 0.082,-0.780); ctx.lineTo( 0.101,-0.505); ctx.stroke();
+
+  ctx.lineWidth = 0.048;                       /* 脖子 */
+  ctx.beginPath(); ctx.moveTo(0,-0.862); ctx.lineTo(0,-0.812); ctx.stroke();
+
+  ctx.beginPath();                             /* 头（略后仰） */
+  ctx.ellipse(0.004,-0.930,0.053,0.061,-0.10,0,6.283); ctx.fill();
+
+  ctx.restore();
+}
+
+/* ---------- 主循环 ---------- */
+let last = performance.now();
+let capShown = false;
+
+function frame(now){
+  const dt = Math.min(0.12, (now-last)/1000); last = now;
+
+  if (playing && hold<=0){
+    const prev = t;
+    t += dt*rateAt(t);
+    if (prev < EGG_T+0.02 && t >= EGG_T+0.02) hold = 4.6;
+    if (t >= T1){ t = T0 + 0.02; }
+  } else if (hold>0){ hold -= dt; }
+
+  const sun = ser("sun", t), moon = ser("moon", t);
+  const sunAlt = sun[0], sunAz = sun[1];
+  const sa = starAlpha(sunAlt);
+  const {z:zen, h:hor} = skyColors(sunAlt);
+
+  /* 天空 */
+  const g = ctx.createLinearGradient(0, cy - fpx*0.62, 0, cy + fpx*0.55);
+  g.addColorStop(0, rgb(zen));
+  g.addColorStop(0.62, rgb([ (zen[0]+hor[0])/2, (zen[1]+hor[1])/2, (zen[2]+hor[2])/2 ]));
+  g.addColorStop(1, rgb(hor));
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+  /* 太阳光晕（贴近地平线时最强） */
+  const sp = projAltAz(sunAlt, sunAz, {});
+  const lowSun = clamp(1 - Math.abs(sunAlt)/14, 0, 1);
+  if (sp && sp.x > -W*0.6 && sp.x < W*1.6){
+    const rad = Math.max(W,H)*(0.30 + 0.5*lowSun);
+    const gg = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, rad);
+    gg.addColorStop(0, `rgba(255,214,150,${0.30+0.45*lowSun})`);
+    gg.addColorStop(0.25, `rgba(255,186,120,${0.12+0.28*lowSun})`);
+    gg.addColorStop(1, "rgba(255,180,110,0)");
+    ctx.fillStyle = gg; ctx.fillRect(0,0,W,H);
+  }
+  /* 太阳本体（在地平线以上时） */
+  if (sp && sunAlt > 1.0){
+    const core = Math.max(5, H*0.013);
+    const R = core*(2.6 + 2.2*lowSun);
+    const sg = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, R*3.2);
+    sg.addColorStop(0, "rgba(255,255,252,1)");
+    sg.addColorStop(0.055, "rgba(255,253,238,0.98)");
+    sg.addColorStop(0.10, "rgba(255,244,205,0.85)");
+    sg.addColorStop(0.22, "rgba(255,226,164,0.42)");
+    sg.addColorStop(0.55, "rgba(255,206,140,0.12)");
+    sg.addColorStop(1, "rgba(255,200,130,0)");
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = sg;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, R*3.2, 0, 6.283); ctx.fill();
+    ctx.restore();
+  }
+
+  /* 地平线暖光带 */
+  if (lowSun > 0.02){
+    const top = H*0.40, bot = H*1.02;
+    const gg = ctx.createLinearGradient(0, top, 0, bot);
+    gg.addColorStop(0, "rgba(255,170,100,0)");
+    gg.addColorStop(0.55, `rgba(255,166,104,${0.14*lowSun})`);
+    gg.addColorStop(1, `rgba(255,150,92,${0.34*lowSun})`);
+    ctx.fillStyle = gg; ctx.fillRect(0, top, W, bot-top);
+  }
+
+  /* 夜间地平线辉光（城镇灯光/气辉） */
+  if (sa > 0.05){
+    const gg = ctx.createLinearGradient(0, H*0.60, 0, H*0.95);
+    gg.addColorStop(0, "rgba(90,110,150,0)");
+    gg.addColorStop(1, `rgba(88,104,138,${0.16*sa})`);
+    ctx.fillStyle = gg; ctx.fillRect(0, H*0.60, W, H*0.35);
+  }
+
+  /* 地平线曲线 */
+  const horPts = [];
+  const tmp = {};
+  for (let az=-110; az<=110; az+=0.4){
+    const p = projAltAz(0, CAM_AZ+az, tmp);
+    if (p) horPts.push([p.x, p.y]);
+  }
+  horPts.sort((a,b)=>a[0]-b[0]);
+  const horY = x => {
+    if (!horPts.length) return H*0.78;
+    if (x <= horPts[0][0]) return horPts[0][1];
+    if (x >= horPts[horPts.length-1][0]) return horPts[horPts.length-1][1];
+    let lo=0, hi=horPts.length-1;
+    while (hi-lo>1){ const m=(lo+hi)>>1; if (horPts[m][0] < x) lo=m; else hi=m; }
+    const [x0,y0]=horPts[lo], [x1,y1]=horPts[hi];
+    return y0 + (y1-y0)*((x-x0)/((x1-x0)||1));
+  };
+
+  /* 星与银河 */
+  if (sa > 0.01){
+    const M = mat(t);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    /* 银河 */
+    if (sa > 0.15){
+      ctx.fillStyle = `rgba(150,170,220,${0.045*sa})`;
+      ctx.beginPath();
+      for (let i=0;i<mwN;i++){
+        const b=i*3, vx=mwV[b], vy=mwV[b+1], vz=mwV[b+2];
+        const X = M[0]*vx+M[1]*vy+M[2]*vz;
+        const Y = M[3]*vx+M[4]*vy+M[5]*vz;
+        const Z = M[6]*vx+M[7]*vy+M[8]*vz;
+        if (Z <= 0.06) continue;
+        const p = projVec(X,Y,Z,tmp); if (!p) continue;
+        if (p.x<-10||p.x>W+10||p.y<-10||p.y>H+10) continue;
+        ctx.rect(p.x, p.y, 1.3, 1.3);
+      }
+      ctx.fill();
+    }
+
+    /* 恒星：色温 × 亮度分层批量绘制 */
+    const TIERS = [
+      {mag:3.0, size:2.6, a:0.98},
+      {mag:4.6, size:1.9, a:0.78},
+      {mag:5.7, size:1.35, a:0.52},
+      {mag:9.9, size:0.95, a:0.30},
+    ];
+    const COLORS = ["rgba(168,196,255,", "rgba(214,228,255,", "rgba(255,248,228,", "rgba(255,214,170,"];
+    const paths = [];
+    for (let ti=0; ti<4; ti++) for (let ci=0; ci<4; ci++) paths.push(new Path2D());
+    const big = [];
+    for (let i=0;i<N;i++){
+      const b=i*3, vx=sV[b], vy=sV[b+1], vz=sV[b+2];
+      const X = M[0]*vx+M[1]*vy+M[2]*vz;
+      const Y = M[3]*vx+M[4]*vy+M[5]*vz;
+      const Z = M[6]*vx+M[7]*vy+M[8]*vz;
+      if (Z <= 0.02) continue;                        // 地平线下
+      const p = projVec(X,Y,Z,tmp); if (!p) continue;
+      if (p.x<-8||p.x>W+8||p.y<-8||p.y>H+8) continue;
+      const m = sMag[i]/10;
+      const ci = sCi[i]/10;
+      const cb = ci<-0.05?0 : ci<0.35?1 : ci<0.95?2 : 3;
+      let ti = m<3.0?0 : m<4.6?1 : m<5.7?2 : 3;
+      const size = TIERS[ti].size;
+      if (m < 1.7) { big.push([p.x,p.y,m]); continue; }
+      paths[ti*4+cb].rect(p.x-size/2, p.y-size/2, size, size);
+    }
+    for (let ti=0; ti<4; ti++){
+      const a = TIERS[ti].a * sa;
+      for (let ci=0; ci<4; ci++){
+        ctx.fillStyle = COLORS[ci] + a + ")";
+        ctx.fill(paths[ti*4+ci]);
+      }
+    }
+
+    /* 亮星加光晕（贴图，避免逐帧建渐变） */
+    for (const [x,y,m] of big){
+      const r = (1.6 + (2.0-m)*1.6)*3.4;
+      ctx.globalAlpha = Math.min(1, sa*(0.55 + (2.0-m)*0.28));
+      ctx.drawImage(GLOW, x-r, y-r, r*2, r*2);
+    }
+    ctx.globalAlpha = 1;
+
+    /* 星座连线 */
+    if (sa > 0.55){
+      ctx.strokeStyle = `rgba(150,180,230,${0.05*sa})`;
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      for (const poly of LINES){
+        let started = false;
+        for (const [la,lo] of poly){
+          const _a = la*D, _z = lo*D;
+          const v = [Math.cos(_a)*Math.sin(_z), Math.cos(_a)*Math.cos(_z), Math.sin(_a)];
+          const X = M[0]*v[0]+M[1]*v[1]+M[2]*v[2];
+          const Y = M[3]*v[0]+M[4]*v[1]+M[5]*v[2];
+          const Z = M[6]*v[0]+M[7]*v[1]+M[8]*v[2];
+          const p = Z>0.06 ? projVec(X,Y,Z,tmp) : null;
+          if (!p){ started=false; continue; }
+          if (!started){ ctx.moveTo(p.x,p.y); started=true; } else ctx.lineTo(p.x,p.y);
+        }
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* 行星 */
+  if (sunAlt < -1.5){
+    const pa = clamp((-sunAlt-1.5)/8, 0, 1);
+    for (const name of ["jupiter","venus","mars","saturn"]){
+      const s = ser(name, t);
+      if (s[0] < 1) continue;
+      const p = projAltAz(s[0], s[1], {}); if (!p) continue;
+      const r = BODY_R[name];
+      const gg = ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,r*6);
+      gg.addColorStop(0, BODY_COL[name]);
+      gg.addColorStop(0.18, BODY_COL[name]);
+      gg.addColorStop(1, "rgba(255,240,210,0)");
+      ctx.globalAlpha = pa; ctx.fillStyle = gg;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r*6,0,6.283); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* 月亮 */
+  drawMoon(moon, sunAlt, sunAz);
+
+  /* 地面 + 人 */
+  const groundAt = drawGround(horY, hor, lowSun);
+  drawPerson(groundAt(W*0.400), hor, lowSun);
+
+  /* 彩蛋 */
+  if (t >= EGG_ON) drawEggs(t, sa, tmp);
+
+  /* UI */
+  const mins = Math.round(t*60);
+  const hh = String(Math.floor(mins/60)%24).padStart(2,"0");
+  const mm = String(mins%60).padStart(2,"0");
+  clock.textContent = hh+":"+mm;
+  const frac = (t-T0)/(T1-T0);
+  fill.style.width = (frac*100)+"%";
+  knob.style.left = (frac*100)+"%";
+  cap.classList.toggle("on", t>EGG_T-0.005 && t<EGG_T+1.1);
+
+  requestAnimationFrame(frame);
+}
+
+function drawMoon(moon, sunAlt, sunAz){
+  if (moon[0] < -1) return;
+  const p = projAltAz(moon[0], moon[1], {}); if (!p) return;
+  const R = Math.max(9, Math.min(W,H)*0.016);
+  const frac = illum(t);
+  const dayA = clamp((6-Math.abs(sunAlt))/14, 0.28, 1);
+  // 亮面朝向太阳
+  const sp = projAltAz(sunAlt, sunAz, {});
+  let ang = sp ? Math.atan2(sp.y-p.y, sp.x-p.x) : -Math.PI/2;
+
+  ctx.save();
+  ctx.globalAlpha = 0.92*dayA;
+  ctx.translate(p.x, p.y); ctx.rotate(ang);
+  const d = ctx.createRadialGradient(0,0,R*0.2,0,0,R);
+  d.addColorStop(0,"rgba(255,253,244,1)");
+  d.addColorStop(1,"rgba(228,232,240,0.95)");
+  ctx.fillStyle = d;
+  ctx.beginPath(); ctx.arc(0,0,R,0,6.283); ctx.fill();
+  // 暗面遮挡（先裁剪到月面，避免擦掉天空）
+  ctx.save();
+  ctx.beginPath(); ctx.arc(0,0,R,0,6.283); ctx.clip();
+  ctx.globalCompositeOperation = "destination-out";
+  const k = clamp(frac, 0.02, 0.98);
+  ctx.beginPath();
+  ctx.ellipse(R*(1-2*k), 0, R*1.02, R*1.02, 0, 0, 6.283);
+  ctx.fill();
+  ctx.restore();
+  ctx.restore();
+
+  // 微光
+  const gg = ctx.createRadialGradient(p.x,p.y,R*0.8,p.x,p.y,R*4);
+  gg.addColorStop(0, `rgba(220,230,255,${0.10*dayA})`);
+  gg.addColorStop(1, "rgba(220,230,255,0)");
+  ctx.fillStyle = gg;
+  ctx.beginPath(); ctx.arc(p.x,p.y,R*4,0,6.283); ctx.fill();
+}
+
+/* 两颗星 */
+function drawEggs(t, sa, tmp){
+  const appear = clamp((t - EGG_ON)/0.05, 0, 1);   // 3 分钟淡入到满
+  if (appear <= 0) return;
+  const M = mat(t);
+  const bx = M[0]*eggBase[0]+M[1]*eggBase[1]+M[2]*eggBase[2];
+  const by = M[3]*eggBase[0]+M[4]*eggBase[1]+M[5]*eggBase[2];
+  const bz = M[6]*eggBase[0]+M[7]*eggBase[1]+M[8]*eggBase[2];
+  const p = projVec(bx,by,bz,tmp); if (!p) return;
+
+  const scale = fpx*Math.tan(EGG_SEP*D);
+  const ph = performance.now()/1000;
+  const orbit = 0.42;            // 轨道半径（以间隔为单位）
+  const spin = ph*0.35;
+  const out = [];
+  for (let i=0;i<2;i++){
+    const a = spin + i*Math.PI;
+    const ex = p.x + Math.cos(a)*scale*orbit;
+    const ey = p.y + Math.sin(a)*scale*orbit*0.75;
+    out.push([ex,ey]);
+    const pulse = 0.70 + 0.30*Math.sin(ph*1.7 + i*1.9);
+    const r = (3.4 + 1.8*pulse)*UI_SCALE;
+    const gg = ctx.createRadialGradient(ex,ey,0,ex,ey,r*6);
+    gg.addColorStop(0, `rgba(255,250,236,${1.0*appear})`);
+    gg.addColorStop(0.10, `rgba(255,226,168,${0.92*appear})`);
+    gg.addColorStop(0.26, `rgba(255,196,116,${0.42*appear*pulse})`);
+    gg.addColorStop(0.58, `rgba(255,170,92,${0.15*appear*pulse})`);
+    gg.addColorStop(1, "rgba(255,150,80,0)");
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = gg;
+    ctx.beginPath(); ctx.arc(ex,ey,r*6,0,6.283); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = `rgba(255,255,252,${0.95*appear})`;
+    ctx.beginPath(); ctx.arc(ex,ey,r*0.62,0,6.283); ctx.fill();
+  }
+  eggScreen = out;
+  eggAlpha = appear;
+}
+let eggScreen = null, eggAlpha = 0;
+
+/* ---------- 交互 ---------- */
+const clock = document.getElementById("clock");
+const fill = document.getElementById("fill");
+const knob = document.getElementById("knob");
+const track = document.getElementById("track");
+const cap = document.getElementById("cap");
+const hint = document.getElementById("hint");
+const mk = document.getElementById("mk");
+mk.style.left = ((EGG_T-T0)/(T1-T0)*100)+"%";
+
+function setTimeFromEvent(e){
+  const r = track.getBoundingClientRect();
+  const x = (e.touches? e.touches[0].clientX : e.clientX) - r.left;
+  t = T0 + clamp(x/r.width,0,1)*(T1-T0);
+  hold = 0;
+}
+let dragging = false;
+track.addEventListener("pointerdown", e=>{ dragging=true; playing=false; setTimeFromEvent(e); track.setPointerCapture(e.pointerId); hideHint(); });
+track.addEventListener("pointermove", e=>{ if(dragging) setTimeFromEvent(e); });
+track.addEventListener("pointerup", e=>{ dragging=false; });
+window.addEventListener("keydown", e=>{
+  if (e.code==="Space"){ e.preventDefault(); playing=!playing; hideHint(); }
+  if (e.code==="ArrowRight"){ t=Math.min(T1, t+0.1); }
+  if (e.code==="ArrowLeft"){ t=Math.max(T0, t-0.1); }
+});
+cvs.addEventListener("pointerdown", e=>{
+  // 点两颗星 -> 重看那一刻
+  if (eggScreen){
+    for (const [x,y] of eggScreen){
+      if (Math.hypot(e.clientX-x, e.clientY-y) < 44){ t = EGG_T-0.06; playing=true; hideHint(); return; }
+    }
+  }
+  playing = !playing; hideHint();
+});
+let hintTimer = setTimeout(()=>{ hint.classList.add("gone"); }, 9000);
+function hideHint(){ clearTimeout(hintTimer); hint.classList.add("gone"); }
+
+/* 调试钩子（无副作用） */
+window.__sky = { set:(v)=>{ t=v; hold=0; }, now:()=>t, pause:()=>{playing=false}, play:()=>{playing=true} };
+
+/* 减少动态偏好：直接停在那一刻 */
+try{
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+    playing = false; t = EGG_T - 0.04;
+  }
+}catch(e){}
+
+/* 首帧 */
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
